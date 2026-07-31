@@ -165,16 +165,13 @@ since only finished calls are ever emitted.
 `ANTHROPIC_MODEL`, and the small-model overrides (`ANTHROPIC_DEFAULT_HAIKU_MODEL` and the older
 `ANTHROPIC_SMALL_FAST_MODEL`, so background calls also land here rather than on the real API).
 
-It works for short prompts — `./dg.sh code -p "Reply with exactly: OK"` returns `OK` from the
-local model. **It does not work for real agentic work.** Claude Code's system prompt plus its
-tool definitions measured **23476 tokens**, against a context budget of **20480**, so anything
-using the full tool set comes back as `conversation too long`.
+This works, including real tool use — `./dg.sh code -p "How many lines are in dg.sh? Use your
+tools."` reads the file and answers correctly. It is slow, and a long session will still run out
+of context because there is no prompt caching, but it works.
 
-Raising `DG_MAXTOK` does not currently help. The backend auto-sizes the context by estimating an
-fp32 `[n_head, N, N]` attention scores buffer, and it applies that estimate *even when flash
-attention is enabled* — though with FA the buffer is never materialized. So `DG_FLASH_ATTN=1`
-plus `DG_MAXTOK=65536` still resolves to 20480. Making that sizing heuristic FA-aware in
-`diffusion-gemma-visual-server.cpp` is the fix, and it is not done here.
+Getting there needed the context fix described below: Claude Code's system prompt plus its tool
+definitions measure about **23.5k tokens** before you type anything, which does not fit in the
+20480 the backend used to allocate.
 
 Two smaller things worth knowing, both of which broke Claude Code until they were fixed:
 
@@ -183,6 +180,27 @@ Two smaller things worth knowing, both of which broke Claude Code until they wer
   to any HEAD it is not explicitly taught, which Claude Code reports as
   "There's an issue with the selected model" — a misleading error that has nothing to do with
   the model name.
+
+## Context: the model does 256K, this setup does 65536
+
+The GGUF reports `context_length = 262144`, so the model itself is a 256K-context model. You will
+not get that here, and it is worth knowing why the number you actually get is what it is.
+
+The visual server sizes its context at startup by probing descending candidates. It used to gate
+each candidate on an estimate of the fp32 `[n_head, N, N]` attention scores buffer — with
+`n_head = 16` that is 26.8 GB at N=20480 and 68.7 GB at N=32768, so on a 64 GB machine the probe
+stopped at 20480.
+
+That buffer is a non-flash-attention artifact. With FA enabled it is never materialized, but the
+gate was applied anyway, capping the context far below what actually fits. `diffusion-gemma-visual-server.cpp`
+now skips the estimate when FA is on and lets the real allocation decide. Measured on a 64 GB
+M-series, auto-sizing goes from 20480 to **65536**; with FA off it is unchanged at 20480.
+
+`dg.sh` therefore turns flash attention on by default. Set `DG_FLASH_ATTN=0` to go back.
+
+65536 is where it stops for two reasons: the candidate list tops out there, and the KV cache for
+this model runs to roughly 245 KB per token, so 256K of context would want ~64 GB of KV alone,
+before weights. A 256K context needs a much bigger machine, not just a bigger number.
 
 ## The model often forgets to close its reasoning channel
 

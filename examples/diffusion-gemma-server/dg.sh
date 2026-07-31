@@ -23,6 +23,10 @@ DG_PORT="${DG_PORT:-8080}"
 DG_NGL="${DG_NGL:-99}"
 DG_MODEL_NAME="${DG_MODEL_NAME:-diffusiongemma}"
 DG_API_KEY="${DG_API_KEY:-}"
+# Flash attention is on by default: it skips the fp32 [n_head, N, N] scores buffer, which is
+# what otherwise caps the context. On a 64 GB M-series this is 65536 tokens instead of 20480.
+# Set DG_FLASH_ATTN=0 if a backend handles FA badly.
+DG_FLASH_ATTN="${DG_FLASH_ATTN:-1}"
 
 BACKEND="$DG_BUILD/bin/llama-diffusion-gemma-visual-server"
 ADAPTER="$SCRIPT_DIR/anthropic_adapter.py"
@@ -93,7 +97,7 @@ Run '$0 init' first."
           --host "$DG_HOST" --port "$DG_PORT" --ngl "$DG_NGL")
     if [ -n "$DG_API_KEY" ];        then args+=(--api-key "$DG_API_KEY"); fi
     if [ -n "${DG_MAXTOK:-}" ];     then args+=(--maxtok "$DG_MAXTOK");   fi
-    if [ -n "${DG_FLASH_ATTN:-}" ]; then args+=(--flash-attn);            fi
+    if [ "$DG_FLASH_ATTN" != "0" ]; then args+=(--flash-attn);            fi
     if [ -n "${DG_VERBOSE:-}" ];    then args+=(-v);                      fi
 
     # exec so Ctrl-C reaches the adapter directly and it can shut the model down cleanly.
@@ -111,9 +115,9 @@ Start it in another terminal with:  $0 start"
     local token="${DG_API_KEY:-local}"
 
     say "Pointing Claude Code at $BASE_URL (model: $DG_MODEL_NAME)"
-    warn "Claude Code's system prompt plus its tool definitions measured 23476 tokens here,"
-    warn "against a 20480-token budget. Short prompts work; anything using the full tool set"
-    warn "returns 'conversation too long'. See README-anthropic-adapter.md."
+    warn "Claude Code's preamble alone is ~23.5k tokens, so it needs the flash-attention"
+    warn "context (the default). Expect it to be slow, and to run out of context on long"
+    warn "sessions -- there is no prompt caching. See README-anthropic-adapter.md."
 
     ANTHROPIC_BASE_URL="$BASE_URL" \
     ANTHROPIC_AUTH_TOKEN="$token" \

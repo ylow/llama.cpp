@@ -206,7 +206,11 @@ int main(int argc, char ** argv) {
             if (raw > ceil_ctx) continue;
             int N = (int) ((raw / canvas_length) * canvas_length);   // whole canvases only
             if (N < floor_ctx) break;
-            if (budget) {   // an fp32 [n_head, N, N] scores buffer is unavoidable (FA off): skip if it can't fit
+            // With FA off an fp32 [n_head, N, N] scores buffer is unavoidable, so skip any N that
+            // plainly cannot fit rather than pay for a doomed allocation. Flash attention never
+            // materializes that buffer, so the estimate does not apply and would cap the context
+            // far below what fits: at n_head=16 it rules out N=32768 on a machine that holds it.
+            if (budget && !fa_on) {
                 const double min_scores = (double) n_head * (double) N * (double) N * 4.0;
                 if (min_scores > (double) budget * 0.9) continue;
             }
@@ -229,7 +233,7 @@ int main(int argc, char ** argv) {
     if (MAXTOK_ENV > 0) {   // explicit budget: honour exactly if it fits, else degrade through the probe
         const double sc = (double) n_head * (double) MAXTOK_ENV * (double) MAXTOK_ENV * 4.0;
         const size_t budget = std::max(v_free, ram_budget);
-        if (!budget || sc <= (double) budget * 0.9) {
+        if (!budget || fa_on || sc <= (double) budget * 0.9) {
             ctx = llama_init_from_model(model, make_cparams(MAXTOK_ENV));
             if (ctx) { MAXTOK = MAXTOK_ENV; reason = "requested"; }
         }
